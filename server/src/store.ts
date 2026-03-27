@@ -61,6 +61,16 @@ class MeetingStore {
     }
   }
 
+  reorderTranscript(meetingId: string, entryId: string, newIndex: number): boolean {
+    const meeting = this.meetings.get(meetingId);
+    if (!meeting) return false;
+    const oldIndex = meeting.transcript.findIndex((e) => e.id === entryId);
+    if (oldIndex === -1) return false;
+    const [entry] = meeting.transcript.splice(oldIndex, 1);
+    meeting.transcript.splice(newIndex, 0, entry);
+    return true;
+  }
+
   endMeeting(id: string): Meeting | undefined {
     const meeting = this.meetings.get(id);
     if (meeting) {

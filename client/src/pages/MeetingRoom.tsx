@@ -12,12 +12,19 @@ export default function MeetingRoom() {
   const [interimEntry, setInterimEntry] = useState<TranscriptEntry | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
-  const [editingSpeakerId, setEditingSpeakerId] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [ending, setEnding] = useState(false);
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const startTimeRef = useRef<number>(Date.now());
+  const editInputRef = useRef<HTMLInputElement>(null);
+
+  // Algılanan benzersiz ses indekslerini topla
+  const detectedVoices = Array.from(
+    new Set(transcripts.map((t) => t.speakerIndex))
+  ).sort();
 
   const onTranscript = useCallback((entry: TranscriptEntry) => {
     setInterimEntry(entry);
@@ -65,7 +72,7 @@ export default function MeetingRoom() {
   useEffect(() => {
     if (isConnected && !isRecording) {
       startRecording().catch(() => {
-        setError('Mikrofon erişimi reddedildi. Lütfen tarayıcı ayarlarından izin verin.');
+        setError('Mikrofon erisimi reddedildi.');
       });
     }
   }, [isConnected]);
@@ -81,37 +88,32 @@ export default function MeetingRoom() {
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [transcripts, interimEntry]);
 
+  // Focus input when editing starts
+  useEffect(() => {
+    if (editingId && editInputRef.current) {
+      editInputRef.current.focus();
+      editInputRef.current.select();
+    }
+  }, [editingId]);
+
   const handleEndMeeting = async () => {
     setEnding(true);
     stopRecording();
-
-    // Try WebSocket first, then fallback to REST API
-    try {
-      endMeeting();
-    } catch {
-      // ignore
-    }
-
-    // Always call REST API as fallback to ensure meeting ends
-    try {
-      await fetch(`/api/meetings/${id}/end`, { method: 'POST' });
-    } catch {
-      // ignore
-    }
-
+    try { endMeeting(); } catch {}
+    try { await fetch(`/api/meetings/${id}/end`, { method: 'POST' }); } catch {}
     disconnect();
     navigate(`/meeting/${id}/summary`);
   };
 
   const formatTime = (seconds: number) => {
-    const m = Math.floor(seconds / 60)
-      .toString()
-      .padStart(2, '0');
+    const m = Math.floor(seconds / 60).toString().padStart(2, '0');
     const s = (seconds % 60).toString().padStart(2, '0');
     return `${m}:${s}`;
   };
 
+  // --- Inline metin duzenleme ---
   const handleEditSave = async (entryId: string) => {
+    if (!editText.trim()) return;
     await fetch(`/api/meetings/${id}/transcript/${entryId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -124,36 +126,87 @@ export default function MeetingRoom() {
     setEditText('');
   };
 
+  // --- Konusmaci degistirme (transkript uzerinde) ---
   const handleSpeakerChange = async (entryId: string, newName: string) => {
     await fetch(`/api/meetings/${id}/transcript/${entryId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ participantName: newName }),
     });
-    const entry = transcripts.find((t) => t.id === entryId);
-    if (entry) {
-      await fetch(`/api/meetings/${id}/speakers`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          speakerIndex: entry.speakerIndex,
-          participantName: newName,
-        }),
-      });
-    }
     setTranscripts((prev) =>
       prev.map((t) => (t.id === entryId ? { ...t, participantName: newName } : t))
     );
-    setEditingSpeakerId(null);
+  };
+
+  // --- Sol panel: ses-katilimci eslestirme ---
+  const handleVoiceMapping = async (speakerIndex: number, participantName: string) => {
+    // Sunucuda speaker map guncelle
+    await fetch(`/api/meetings/${id}/speakers`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ speakerIndex, participantName }),
+    });
+    // Meeting state guncelle
+    setMeeting((prev) =>
+      prev ? { ...prev, speakerMap: { ...prev.speakerMap, [speakerIndex]: participantName } } : prev
+    );
+    // Tum transkript satirlarini guncelle
+    setTranscripts((prev) =>
+      prev.map((t) =>
+        t.speakerIndex === speakerIndex ? { ...t, participantName } : t
+      )
+    );
+  };
+
+  // --- Surukleme ---
+  const handleDragStart = (entryId: string) => {
+    setDraggedId(entryId);
+  };
+
+  const handleDragOver = (e: React.DragEvent, idx: number) => {
+    e.preventDefault();
+    setDragOverIdx(idx);
+  };
+
+  const handleDrop = async (dropIdx: number) => {
+    if (!draggedId) return;
+    const oldIdx = transcripts.findIndex((t) => t.id === draggedId);
+    if (oldIdx === -1 || oldIdx === dropIdx) {
+      setDraggedId(null);
+      setDragOverIdx(null);
+      return;
+    }
+
+    // Yerel state guncelle
+    const newList = [...transcripts];
+    const [moved] = newList.splice(oldIdx, 1);
+    const insertIdx = dropIdx > oldIdx ? dropIdx - 1 : dropIdx;
+    newList.splice(insertIdx, 0, moved);
+    setTranscripts(newList);
+
+    // Sunucuya bildir
+    fetch(`/api/meetings/${id}/transcript/${draggedId}/reorder`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ newIndex: insertIdx }),
+    });
+
+    setDraggedId(null);
+    setDragOverIdx(null);
+  };
+
+  const handleDragEnd = () => {
+    setDraggedId(null);
+    setDragOverIdx(null);
   };
 
   const speakerColors = [
-    { badge: 'bg-blue-100 text-blue-800', dot: 'bg-blue-500' },
-    { badge: 'bg-emerald-100 text-emerald-800', dot: 'bg-emerald-500' },
-    { badge: 'bg-violet-100 text-violet-800', dot: 'bg-violet-500' },
-    { badge: 'bg-amber-100 text-amber-800', dot: 'bg-amber-500' },
-    { badge: 'bg-rose-100 text-rose-800', dot: 'bg-rose-500' },
-    { badge: 'bg-cyan-100 text-cyan-800', dot: 'bg-cyan-500' },
+    { badge: 'bg-blue-100 text-blue-800', border: 'border-blue-300' },
+    { badge: 'bg-emerald-100 text-emerald-800', border: 'border-emerald-300' },
+    { badge: 'bg-violet-100 text-violet-800', border: 'border-violet-300' },
+    { badge: 'bg-amber-100 text-amber-800', border: 'border-amber-300' },
+    { badge: 'bg-rose-100 text-rose-800', border: 'border-rose-300' },
+    { badge: 'bg-cyan-100 text-cyan-800', border: 'border-cyan-300' },
   ];
 
   const getColor = (index: number) => speakerColors[index % speakerColors.length];
@@ -209,28 +262,89 @@ export default function MeetingRoom() {
 
       <div className="flex flex-1 overflow-hidden">
         {/* Sidebar */}
-        <aside className="w-72 bg-white/60 backdrop-blur-sm border-r border-slate-200 p-5 hidden md:flex flex-col">
-          <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">
-            Katilimcilar
-          </h2>
-          <ul className="space-y-2">
-            {meeting?.participants.map((name, i) => (
-              <li key={name} className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-slate-50 transition">
-                <span
-                  className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold ${getColor(i).badge}`}
-                >
-                  {name[0].toUpperCase()}
-                </span>
-                <span className="text-slate-700 font-medium text-sm">{name}</span>
-              </li>
-            ))}
-          </ul>
+        <aside className="w-72 bg-white/60 backdrop-blur-sm border-r border-slate-200 p-5 hidden md:flex flex-col gap-6">
+          {/* Ses Eslestirme */}
+          <div>
+            <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">
+              Ses Eslestirme
+            </h2>
+            {detectedVoices.length === 0 ? (
+              <p className="text-xs text-slate-400 italic px-1">
+                Henuz ses algilanmadi...
+              </p>
+            ) : (
+              <ul className="space-y-2">
+                {detectedVoices.map((si) => {
+                  const color = getColor(si);
+                  const currentMapping = meeting?.speakerMap?.[si];
+                  const isMapped = currentMapping && !currentMapping.startsWith('Ses ');
+                  return (
+                    <li key={si} className={`rounded-xl border ${color.border} bg-white p-3`}>
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${color.badge}`}>
+                          {si + 1}
+                        </span>
+                        <span className="text-xs font-semibold text-slate-600">
+                          Ses {si + 1}
+                        </span>
+                        {isMapped && (
+                          <span className="ml-auto text-xs text-emerald-600 font-medium">
+                            ✓
+                          </span>
+                        )}
+                      </div>
+                      <select
+                        className="w-full text-sm border border-slate-200 rounded-lg px-2 py-1.5 bg-white focus:ring-2 focus:ring-blue-500 outline-none"
+                        value={isMapped ? currentMapping : ''}
+                        onChange={(e) => {
+                          if (e.target.value) {
+                            handleVoiceMapping(si, e.target.value);
+                          }
+                        }}
+                      >
+                        <option value="">-- Katilimci sec --</option>
+                        {meeting?.participants.map((p) => (
+                          <option key={p} value={p}>{p}</option>
+                        ))}
+                      </select>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+
+          {/* Katilimcilar */}
+          <div>
+            <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">
+              Katilimcilar
+            </h2>
+            <ul className="space-y-1.5">
+              {meeting?.participants.map((name, i) => {
+                // Bu katilimciya eslestirilmis ses var mi?
+                const matchedVoice = Object.entries(meeting.speakerMap || {}).find(
+                  ([, v]) => v === name
+                );
+                return (
+                  <li key={name} className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-slate-50 transition">
+                    <span className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${getColor(i).badge}`}>
+                      {name[0].toUpperCase()}
+                    </span>
+                    <span className="text-slate-700 font-medium text-sm flex-1">{name}</span>
+                    {matchedVoice && (
+                      <span className="text-xs text-slate-400">
+                        Ses {Number(matchedVoice[0]) + 1}
+                      </span>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
 
           <div className="mt-auto pt-4 border-t border-slate-200">
             <div className="flex items-center gap-2 px-3 py-2">
-              <span
-                className={`w-2.5 h-2.5 rounded-full ${isConnected ? 'bg-emerald-500' : 'bg-red-500'}`}
-              />
+              <span className={`w-2.5 h-2.5 rounded-full ${isConnected ? 'bg-emerald-500' : 'bg-red-500'}`} />
               <span className="text-sm text-slate-500">
                 {isConnected ? 'Sunucuya bagli' : 'Baglanti kesildi'}
               </span>
@@ -252,107 +366,136 @@ export default function MeetingRoom() {
             </div>
           )}
 
-          <div className="max-w-3xl mx-auto p-6 space-y-1">
+          <div className="p-6 space-y-0">
             {transcripts.map((entry, idx) => {
               const prevEntry = idx > 0 ? transcripts[idx - 1] : null;
               const showSpeaker = !prevEntry || prevEntry.participantName !== entry.participantName;
+              const isDragging = draggedId === entry.id;
+              const isDropTarget = dragOverIdx === idx;
 
               return (
-                <div key={entry.id} className={`group ${showSpeaker ? 'mt-4' : ''}`}>
-                  {showSpeaker && (
-                    <div className="flex items-center gap-2 mb-1.5">
-                      {editingSpeakerId === entry.id ? (
-                        <select
-                          className="text-sm font-semibold border border-slate-300 rounded-lg px-2 py-1 bg-white focus:ring-2 focus:ring-blue-500 outline-none"
-                          value={entry.participantName}
-                          onChange={(e) => handleSpeakerChange(entry.id, e.target.value)}
-                          onBlur={() => setEditingSpeakerId(null)}
-                          autoFocus
-                        >
-                          {meeting?.participants.map((p) => (
-                            <option key={p} value={p}>{p}</option>
-                          ))}
-                        </select>
-                      ) : (
-                        <button
-                          onClick={() => setEditingSpeakerId(entry.id)}
-                          className={`text-sm font-semibold px-2.5 py-1 rounded-lg ${getColor(entry.speakerIndex).badge} hover:opacity-80 transition cursor-pointer`}
-                          title="Konusmacıyı degistir"
-                        >
-                          {entry.participantName}
-                        </button>
-                      )}
-                      <span className="text-xs text-slate-400 font-mono">
-                        {formatTime(entry.timestamp)}
-                      </span>
-                    </div>
-                  )}
+                <div key={entry.id}>
+                  {/* Drop zone */}
+                  <div
+                    className={`transition-all ${isDropTarget ? 'h-1 bg-blue-400 rounded-full my-1' : 'h-0'}`}
+                    onDragOver={(e) => handleDragOver(e, idx)}
+                    onDrop={() => handleDrop(idx)}
+                  />
 
-                  {editingId === entry.id ? (
-                    <div className="flex gap-2 pl-0.5">
-                      <input
-                        type="text"
-                        value={editText}
-                        onChange={(e) => setEditText(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') handleEditSave(entry.id);
-                          if (e.key === 'Escape') setEditingId(null);
-                        }}
-                        className="flex-1 px-3 py-1.5 border border-blue-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-blue-50/50"
-                        autoFocus
-                      />
-                      <button
-                        onClick={() => handleEditSave(entry.id)}
-                        className="text-xs bg-blue-600 text-white px-3 py-1.5 rounded-lg hover:bg-blue-700 transition font-medium"
-                      >
-                        Kaydet
-                      </button>
-                      <button
-                        onClick={() => setEditingId(null)}
-                        className="text-xs text-slate-400 hover:text-slate-600 px-2"
-                      >
-                        Iptal
-                      </button>
+                  <div
+                    draggable
+                    onDragStart={() => handleDragStart(entry.id)}
+                    onDragOver={(e) => handleDragOver(e, idx)}
+                    onDrop={() => handleDrop(idx)}
+                    onDragEnd={handleDragEnd}
+                    className={`group flex items-start gap-2 ${showSpeaker ? 'mt-4' : ''} ${isDragging ? 'opacity-30' : ''} transition-opacity`}
+                  >
+                    {/* Drag handle */}
+                    <div className="w-5 pt-1 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity cursor-grab active:cursor-grabbing select-none text-slate-300 hover:text-slate-500">
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                        <circle cx="5" cy="3" r="1.5" />
+                        <circle cx="11" cy="3" r="1.5" />
+                        <circle cx="5" cy="8" r="1.5" />
+                        <circle cx="11" cy="8" r="1.5" />
+                        <circle cx="5" cy="13" r="1.5" />
+                        <circle cx="11" cy="13" r="1.5" />
+                      </svg>
                     </div>
-                  ) : (
-                    <p
-                      className="text-slate-700 text-sm leading-relaxed cursor-pointer hover:bg-white rounded-lg px-2 py-1 -mx-2 transition group-hover:bg-white/50"
-                      onClick={() => {
-                        setEditingId(entry.id);
-                        setEditText(entry.text);
-                      }}
-                      title="Duzenlemek icin tiklayin"
-                    >
-                      {!showSpeaker && (
-                        <span className="text-xs text-slate-400 font-mono mr-2">
-                          {formatTime(entry.timestamp)}
-                        </span>
+
+                    <div className="flex-1 min-w-0">
+                      {showSpeaker && (
+                        <div className="flex items-center gap-2 mb-1">
+                          <select
+                            className={`text-sm font-semibold px-2 py-0.5 rounded-lg ${getColor(entry.speakerIndex).badge} border-0 outline-none cursor-pointer appearance-none bg-transparent`}
+                            style={{ backgroundImage: 'none' }}
+                            value={entry.participantName}
+                            onChange={(e) => handleSpeakerChange(entry.id, e.target.value)}
+                          >
+                            <option value={entry.participantName}>{entry.participantName}</option>
+                            {meeting?.participants
+                              .filter((p) => p !== entry.participantName)
+                              .map((p) => (
+                                <option key={p} value={p}>{p}</option>
+                              ))}
+                          </select>
+                          <span className="text-xs text-slate-400 font-mono">
+                            {formatTime(entry.timestamp)}
+                          </span>
+                        </div>
                       )}
-                      {entry.text}
-                    </p>
-                  )}
+
+                      {editingId === entry.id ? (
+                        <input
+                          ref={editInputRef}
+                          type="text"
+                          value={editText}
+                          onChange={(e) => setEditText(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleEditSave(entry.id);
+                            if (e.key === 'Escape') { setEditingId(null); setEditText(''); }
+                          }}
+                          onBlur={() => {
+                            if (editText.trim() && editText !== entry.text) {
+                              handleEditSave(entry.id);
+                            } else {
+                              setEditingId(null);
+                              setEditText('');
+                            }
+                          }}
+                          className="w-full text-slate-700 text-sm leading-relaxed px-2 py-1 -mx-2 rounded-lg border border-blue-300 bg-blue-50/50 outline-none focus:ring-2 focus:ring-blue-400"
+                        />
+                      ) : (
+                        <p
+                          className="text-slate-700 text-sm leading-relaxed cursor-text hover:bg-white rounded-lg px-2 py-1 -mx-2 transition"
+                          onClick={() => {
+                            setEditingId(entry.id);
+                            setEditText(entry.text);
+                          }}
+                        >
+                          {!showSpeaker && (
+                            <span className="text-xs text-slate-400 font-mono mr-2">
+                              {formatTime(entry.timestamp)}
+                            </span>
+                          )}
+                          {entry.text}
+                        </p>
+                      )}
+                    </div>
+                  </div>
                 </div>
               );
             })}
 
+            {/* Son drop zone */}
+            {draggedId && (
+              <div
+                className={`transition-all ${dragOverIdx === transcripts.length ? 'h-1 bg-blue-400 rounded-full my-1' : 'h-px'}`}
+                onDragOver={(e) => handleDragOver(e, transcripts.length)}
+                onDrop={() => handleDrop(transcripts.length)}
+              />
+            )}
+
             {interimEntry && (
-              <div className="mt-4 opacity-70">
-                <div className="flex items-center gap-2 mb-1.5">
-                  <span className={`text-sm font-semibold px-2.5 py-1 rounded-lg ${getColor(interimEntry.speakerIndex).badge}`}>
-                    {interimEntry.participantName}
-                  </span>
-                  <span className="text-xs text-slate-400 font-mono">
-                    {formatTime(interimEntry.timestamp)}
-                  </span>
-                  <span className="flex gap-0.5">
-                    <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                    <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                    <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                  </span>
+              <div className="mt-4 opacity-70 flex items-start gap-2">
+                <div className="w-5" />
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className={`text-sm font-semibold px-2 py-0.5 rounded-lg ${getColor(interimEntry.speakerIndex).badge}`}>
+                      {interimEntry.participantName}
+                    </span>
+                    <span className="text-xs text-slate-400 font-mono">
+                      {formatTime(interimEntry.timestamp)}
+                    </span>
+                    <span className="flex gap-0.5">
+                      <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                      <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                      <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                    </span>
+                  </div>
+                  <p className="text-slate-500 text-sm italic leading-relaxed px-0.5">
+                    {interimEntry.text}
+                  </p>
                 </div>
-                <p className="text-slate-500 text-sm italic leading-relaxed px-0.5">
-                  {interimEntry.text}
-                </p>
               </div>
             )}
 

@@ -63,6 +63,22 @@ router.patch('/meetings/:id/transcript/:entryId', (req, res) => {
   res.json(entry);
 });
 
+router.patch('/meetings/:id/transcript/:entryId/reorder', (req, res) => {
+  const id = req.params.id as string;
+  const entryId = req.params.entryId as string;
+  const { newIndex } = req.body;
+  if (typeof newIndex !== 'number') {
+    res.status(400).json({ error: 'newIndex is required' });
+    return;
+  }
+  const success = store.reorderTranscript(id, entryId, newIndex);
+  if (!success) {
+    res.status(404).json({ error: 'Entry or meeting not found' });
+    return;
+  }
+  res.json({ success: true });
+});
+
 router.patch('/meetings/:id/speakers', (req, res) => {
   const id = req.params.id as string;
   const { speakerIndex, participantName } = req.body;

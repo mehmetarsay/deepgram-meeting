@@ -3,19 +3,29 @@ import { config } from '../config';
 import { store } from '../store';
 import { TranscriptEntry } from '../types';
 import { v4 as uuidv4 } from 'uuid';
+import { VoiceAnalyzer } from './voiceAnalyzer';
 
 type TranscriptCallback = (entry: TranscriptEntry, isFinal: boolean) => void;
+
+interface SpeakerSegment {
+  speakerIndex: number;
+  text: string;
+  startTime: number;
+  endTime: number;
+}
 
 export class DeepgramBridge {
   private connection: any = null;
   private meetingId: string;
   private onTranscript: TranscriptCallback;
   private meetingStartTime: number;
+  private voiceAnalyzer: VoiceAnalyzer;
 
   constructor(meetingId: string, onTranscript: TranscriptCallback) {
     this.meetingId = meetingId;
     this.onTranscript = onTranscript;
     this.meetingStartTime = Date.now();
+    this.voiceAnalyzer = new VoiceAnalyzer(16000);
   }
 
   async start(): Promise<void> {
@@ -54,14 +64,19 @@ export class DeepgramBridge {
         const meeting = store.getMeeting(this.meetingId);
         if (!meeting) continue;
 
+        // Ses profilini güncelle (final sonuçlarda)
+        if (isFinal && segment.startTime >= 0 && segment.endTime > segment.startTime) {
+          this.voiceAnalyzer.updateProfile(
+            segment.speakerIndex,
+            segment.startTime,
+            segment.endTime
+          );
+        }
+
+        // Konuşmacı eşleştirme: kullanıcı eşleştirmediyse genel isim kullan
         let participantName = meeting.speakerMap[segment.speakerIndex];
         if (!participantName) {
-          const mappedCount = Object.keys(meeting.speakerMap).length;
-          if (mappedCount < meeting.participants.length) {
-            participantName = meeting.participants[mappedCount];
-          } else {
-            participantName = `Konuşmacı ${segment.speakerIndex + 1}`;
-          }
+          participantName = `Ses ${segment.speakerIndex + 1}`;
           store.updateSpeakerMap(this.meetingId, segment.speakerIndex, participantName);
         }
 
@@ -95,6 +110,8 @@ export class DeepgramBridge {
 
   sendAudio(audio: Buffer): void {
     if (this.connection) {
+      // Ses verisini hem Deepgram'a gönder hem de analiz tamponuna ekle
+      this.voiceAnalyzer.addAudio(audio);
       this.connection.send(audio);
     }
   }
@@ -106,12 +123,13 @@ export class DeepgramBridge {
     }
   }
 
-  private groupWordsBySpeaker(words: any[]): { speakerIndex: number; text: string }[] {
+  private groupWordsBySpeaker(words: any[]): SpeakerSegment[] {
     if (words.length === 0) return [];
 
-    const segments: { speakerIndex: number; text: string }[] = [];
+    const segments: SpeakerSegment[] = [];
     let currentSpeaker = words[0].speaker ?? 0;
     let currentWords: string[] = [words[0].punctuated_word || words[0].word];
+    let segmentStart: number = words[0].start ?? 0;
 
     for (let i = 1; i < words.length; i++) {
       const word = words[i];
@@ -121,9 +139,12 @@ export class DeepgramBridge {
         segments.push({
           speakerIndex: currentSpeaker,
           text: currentWords.join(' '),
+          startTime: segmentStart,
+          endTime: words[i - 1].end ?? segmentStart,
         });
         currentSpeaker = speaker;
         currentWords = [];
+        segmentStart = word.start ?? 0;
       }
       currentWords.push(word.punctuated_word || word.word);
     }
@@ -131,6 +152,8 @@ export class DeepgramBridge {
     segments.push({
       speakerIndex: currentSpeaker,
       text: currentWords.join(' '),
+      startTime: segmentStart,
+      endTime: words[words.length - 1].end ?? segmentStart,
     });
 
     return segments;
