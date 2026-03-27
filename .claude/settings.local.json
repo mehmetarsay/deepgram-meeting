@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(node -e \"const { createClient } = require\\(''@deepgram/sdk''\\); console.log\\(''SDK OK''\\)\")",
+      "Bash(curl -s -X POST http://localhost:3001/api/meetings -H \"Content-Type: application/json\" -d '{\"\"\"\"name\"\"\"\":\"\"\"\"Test Toplantısı\"\"\"\",\"\"\"\"participants\"\"\"\":[\"\"\"\"Ahmet\"\"\"\",\"\"\"\"Fatma\"\"\"\",\"\"\"\"Ali\"\"\"\"],\"\"\"\"language\"\"\"\":\"\"\"\"tr\"\"\"\"}')",
+      "Bash(python3 -m json.tool)",
+      "Bash(pkill -f \"node server.js\")"
+    ]
+  }
+}
