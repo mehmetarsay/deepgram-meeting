@@ -20,6 +20,7 @@ export class DeepgramBridge {
   private onTranscript: TranscriptCallback;
   private meetingStartTime: number;
   private voiceAnalyzer: VoiceAnalyzer;
+  private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(meetingId: string, onTranscript: TranscriptCallback) {
     this.meetingId = meetingId;
@@ -46,6 +47,17 @@ export class DeepgramBridge {
 
     this.connection.on(LiveTranscriptionEvents.Open, () => {
       console.log(`[Deepgram] Connection opened for meeting ${this.meetingId}`);
+
+      // Keep-alive: her 8 saniyede bir bağlantıyı canlı tut
+      this.keepAliveTimer = setInterval(() => {
+        if (this.connection) {
+          try {
+            this.connection.keepAlive();
+          } catch {
+            // ignore
+          }
+        }
+      }, 8000);
     });
 
     this.connection.on(LiveTranscriptionEvents.Transcript, (data: any) => {
@@ -110,13 +122,18 @@ export class DeepgramBridge {
 
   sendAudio(audio: Buffer): void {
     if (this.connection) {
-      // Ses verisini hem Deepgram'a gönder hem de analiz tamponuna ekle
+      // Ham sesi VoiceAnalyzer'a ver (profil oluşturma için)
       this.voiceAnalyzer.addAudio(audio);
+      // Deepgram'a ham ses gönder — kendi diarization modeli işlesin
       this.connection.send(audio);
     }
   }
 
   stop(): void {
+    if (this.keepAliveTimer) {
+      clearInterval(this.keepAliveTimer);
+      this.keepAliveTimer = null;
+    }
     if (this.connection) {
       this.connection.requestClose();
       this.connection = null;
